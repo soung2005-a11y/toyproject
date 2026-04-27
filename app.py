@@ -5,8 +5,7 @@ from urllib.parse import urlparse, parse_qs
 
 import pandas as pd
 import streamlit as st
-from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
+import requests
 
 
 st.set_page_config(page_title="유튜브 댓글 가져오기", layout="wide")
@@ -42,45 +41,70 @@ def get_video_id(url: str):
 
         path_parts = [p for p in parsed.path.split("/") if p]
 
-        common_paths = ["shorts", "embed", "live", "v"]
-        if len(path_parts) >= 2 and path_parts[0] in common_paths:
+        if len(path_parts) >= 2 and path_parts[0] in ["shorts", "embed", "live", "v"]:
             return path_parts[1]
 
-    match = re.search(r"^[a-zA-Z0-9_-]{11}$", url)
-    if match:
+    if re.fullmatch(r"[a-zA-Z0-9_-]{11}", url):
         return url
 
     return None
 
 
 @st.cache_resource
-def get_youtube_service(api_key: str):
-    return build("youtube", "v3", developerKey=api_key)
+def get_youtube_session():
+    session = requests.Session()
+    return session
 
 
 def change_to_korea_time(utc_time: str):
-    return pd.to_datetime(utc_time, utc=True).tz_convert("Asia/Seoul").strftime("%Y-%m-%d %H:%M:%S")
+    return (
+        pd.to_datetime(utc_time, utc=True)
+        .tz_convert("Asia/Seoul")
+        .strftime("%Y-%m-%d %H:%M:%S")
+    )
 
 
 def get_comments(video_id: str, api_key: str):
-    youtube = get_youtube_service(api_key)
+    session = get_youtube_session()
 
     comments = []
-    next_page_token = None
+    next_page_token = ""
 
     while True:
-        request = youtube.commentThreads().list(
-            part="snippet",
-            videoId=video_id,
-            order="relevance",
-            textFormat="plainText",
-            maxResults=100,
-            pageToken=next_page_token,
-        )
+        url = "https://www.googleapis.com/youtube/v3/commentThreads"
 
-        response = request.execute()
+        params = {
+            "part": "snippet",
+            "videoId": video_id,
+            "order": "relevance",
+            "textFormat": "plainText",
+            "maxResults": 100,
+            "key": api_key,
+        }
 
-        for item in response.get("items", []):
+        if next_page_token:
+            params["pageToken"] = next_page_token
+
+        response = session.get(url, params=params, timeout=20)
+        data = response.json()
+
+        if response.status_code != 200:
+            error_reason = ""
+
+            try:
+                error_reason = data["error"]["errors"][0]["reason"]
+            except Exception:
+                error_reason = ""
+
+            if error_reason in ["commentsDisabled", "forbidden"]:
+                raise ValueError("comments_disabled")
+
+            if error_reason in ["quotaExceeded", "dailyLimitExceeded"]:
+                raise ValueError("quota_exceeded")
+
+            raise ValueError("unknown_error")
+
+        for item in data.get("items", []):
             top_comment = item["snippet"]["topLevelComment"]["snippet"]
 
             comments.append(
@@ -91,7 +115,7 @@ def get_comments(video_id: str, api_key: str):
                 }
             )
 
-        next_page_token = response.get("nextPageToken")
+        next_page_token = data.get("nextPageToken", "")
 
         if not next_page_token:
             break
@@ -107,9 +131,7 @@ sample_url = "https://www.youtube.com/watch?v=WXuK6gekU1Y"
 
 video_url = st.text_input("유튜브 영상 주소", value=sample_url)
 
-button_disabled = not YOUTUBE_API_KEY
-
-run_button = st.button("댓글 가져오기", disabled=button_disabled)
+run_button = st.button("댓글 가져오기", disabled=not YOUTUBE_API_KEY)
 
 if run_button:
     video_id = get_video_id(video_url)
@@ -141,12 +163,10 @@ if run_button:
             mime="text/csv",
         )
 
-    except HttpError as error:
-        error_text = str(error)
-
-        if "commentsDisabled" in error_text or "forbidden" in error_text:
+    except ValueError as error:
+        if str(error) == "comments_disabled":
             st.error("이 영상은 댓글을 볼 수 없어요.")
-        elif "quotaExceeded" in error_text:
+        elif str(error) == "quota_exceeded":
             st.error("오늘 사용할 수 있는 조회량이 다 됐어요.")
         else:
             st.error("댓글을 가져오는 중 문제가 생겼어요. 주소와 키를 다시 확인해 주세요.")
