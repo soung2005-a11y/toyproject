@@ -5,8 +5,6 @@ from urllib.parse import urlparse, parse_qs
 
 import pandas as pd
 import streamlit as st
-from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
 from zoneinfo import ZoneInfo
 
 
@@ -25,6 +23,8 @@ def get_youtube_api_key():
 
 @st.cache_resource
 def get_youtube_service(api_key):
+    from googleapiclient.discovery import build
+
     return build("youtube", "v3", developerKey=api_key)
 
 
@@ -53,13 +53,13 @@ def extract_video_id(url):
             if re.fullmatch(r"[a-zA-Z0-9_-]{11}", video_id):
                 return video_id
 
-        common_patterns = [
+        patterns = [
             r"^shorts/([a-zA-Z0-9_-]{11})",
             r"^embed/([a-zA-Z0-9_-]{11})",
             r"^live/([a-zA-Z0-9_-]{11})",
         ]
 
-        for pattern in common_patterns:
+        for pattern in patterns:
             match = re.search(pattern, path)
             if match:
                 return match.group(1)
@@ -83,20 +83,26 @@ def make_csv_for_excel(dataframe):
 
 
 def get_popular_comments(youtube, video_id, max_comments=100):
+    from googleapiclient.errors import HttpError
+
     comments = []
     next_page_token = None
 
     while len(comments) < max_comments:
-        request = youtube.commentThreads().list(
-            part="snippet",
-            videoId=video_id,
-            order="relevance",
-            textFormat="plainText",
-            maxResults=min(100, max_comments - len(comments)),
-            pageToken=next_page_token,
-        )
+        try:
+            request = youtube.commentThreads().list(
+                part="snippet",
+                videoId=video_id,
+                order="relevance",
+                textFormat="plainText",
+                maxResults=min(100, max_comments - len(comments)),
+                pageToken=next_page_token,
+            )
 
-        response = request.execute()
+            response = request.execute()
+
+        except HttpError as error:
+            raise error
 
         for item in response.get("items", []):
             snippet = item["snippet"]["topLevelComment"]["snippet"]
@@ -122,7 +128,7 @@ api_key = get_youtube_api_key()
 if not api_key:
     st.error("API키가 없어요. .streamlit/secrets.toml에 넣어 주세요.")
 
-sample_url = "https://www.outube.com/watch?v=WXuK6gekU1Y"
+sample_url = "https://www.youtube.com/watch?v=WXuK6gekU1Y"
 
 video_url = st.text_input(
     "유튜브 주소",
@@ -130,8 +136,7 @@ video_url = st.text_input(
     placeholder="유튜브 영상 주소를 입력해 주세요.",
 )
 
-button_disabled = api_key is None
-run_button = st.button("댓글 가져오기", disabled=button_disabled)
+run_button = st.button("댓글 가져오기", disabled=api_key is None)
 
 if run_button:
     video_id = extract_video_id(video_url)
@@ -163,7 +168,7 @@ if run_button:
             mime="text/csv",
         )
 
-    except HttpError as error:
+    except Exception as error:
         error_text = str(error)
 
         if "commentsDisabled" in error_text or "disabled comments" in error_text:
@@ -172,6 +177,3 @@ if run_button:
             st.error("오늘 사용할 수 있는 조회량이 다 됐어요.")
         else:
             st.error("댓글을 가져오는 중 문제가 생겼어요. 주소와 키를 다시 확인해 주세요.")
-
-    except Exception:
-        st.error("댓글을 가져오는 중 문제가 생겼어요. 주소와 키를 다시 확인해 주세요.")
